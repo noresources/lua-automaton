@@ -1,20 +1,79 @@
---------------------------------------------------
--- State
-
-local StateClass = {
-	EVENT = {
-		ENTER = "enter",
-		EXIT = "exit"
+local public = {
+	State = {
+		EVENT = {
+			ENTER = "enter",
+			EXIT = "exit"
+		}
+	},
+	Automaton = {
+		EVENT = {
+			START = "start",
+			EXIT = "exit",
+			TRANSITION = "transition",
+			ENTER = "enter",
+			TERMINATE = "terminate"
+		}
 	}
 }
 
-local StateInstance = {}
+local internal = {
+	State = {},
+	Automaton = {}
+}
 
-function StateInstance:on(event, handler)
+function internal.typecheck(value, expected, name)
+	local t = type(value)
+	assert ( t == expected, name 
+		and expected .. " type expected for " .. name .. ". Got " .. t
+		or expected " expected. Got " .. t)
+end
+
+function internal.iscallable(value)
+	local t = type(value)
+	if t == "function" then return true end
+	if t ~= "table" then return false end
+	
+	local mt = getmetatable (value)
+	if not mt then return false end
+		
+	return type(mt.__call) == "function"
+end
+
+function internal:on (event, handler)
+	internal.typecheck(event, "string", "event")
 	self._listeners[event] = handler
 end
 
-function StateInstance:connect(validator, state)
+function internal.__index(o, k)
+	return rawget(o, "_" .. k)
+end
+
+function internal.includes(haystack, needle)
+	for _, e in ipairs (haystack)
+	do
+		if e == needle then return true end
+	end
+	return false
+end
+
+function internal.invoke (type, emitter, data)
+	local handler = emitter.listeners [type]
+	if not handler then return end
+	local event = {}
+	for k, v in pairs (data or {})
+	do
+		event[k] = v
+	end
+	event.type = type
+	handler (event)
+end
+
+-------------------------------------
+-- State
+
+function internal.State:connect(validator, state)
+	internal.typecheck(state, "table", "state")
+	
 	local t = type (validator)
 	if (t == "boolean") or (t == "nil")
 	then
@@ -33,6 +92,7 @@ function StateInstance:connect(validator, state)
 			return tonumber(e.context) == V
 		end
 	elseif t == "table"
+		and not internal.iscallable(validator)
 	then
 		local V = validator
 		validator = function (e)
@@ -43,10 +103,13 @@ function StateInstance:connect(validator, state)
 			return true
 		end
 	end
+	
+	assert(internal.iscallable(validator), "Validator must be callable")
+	
 	table.insert(self._transitions, {validator = validator, state = state})
 end
 
-function StateInstance:accept( context )
+function internal.State:accept( context )
 	for _, t in ipairs (self._transitions)
 	do
 		if t.validator({
@@ -61,16 +124,19 @@ function StateInstance:accept( context )
 	return nil
 end
 
-function StateClass.new(data)
+function public.State.new(data)
 	local this = {}
 	for k, v in pairs (data or {})
 	do
 		this[k] = v
 	end
-	this._transitions = {}
+	
+	this.on = internal.on
 	this._listeners = {}
 	
-	for k, f in pairs (StateInstance)
+	this._transitions = {}
+	
+	for k, f in pairs (internal.State)
 	do
 		this[k] = f
 	end
@@ -79,54 +145,22 @@ function StateClass.new(data)
 		__call = function (this, context)
 			return this:accept(context)
 		end,
-		__index = function (o, k)
-			return rawget (o, "_" .. k)
-		end
+		__index = internal.__index
 	})
 	
 	return this
 end
 
-
-setmetatable (StateClass, {
-	__call = function (StateClass, data)
-		return StateClass.new(data)
+setmetatable (public.State, {
+	__call = function(data)
+		return public.State.new(data)
 	end
 })
 
 --------------------------------------------------
 -- Automaton
-local AutomatonClass = {
-	EVENT = {
-		START = "start",
-		EXIT = "exit",
-		TRANSITION = "transition",
-		ENTER = "enter",
-		TERMINATE = "terminate"
-	}
-}
 
-local function includes(haystack, needle)
-	for _, e in ipairs (haystack)
-	do
-		if e == needle then return true end
-	end
-	return false
-end
-
-local function invoke (type, emitter, data)
-	local handler = emitter.listeners [type]
-	if not handler then return end
-	local event = {}
-	for k, v in pairs (data or {})
-	do
-		event[k] = v
-	end
-	event.type = type
-	handler (event)
-end
-
-local function AutomatonInstanceIterator(automaton)
+function internal.Automaton._iterator(automaton)
 	automaton._current = nil
 	local i = 0
 	return function ()
@@ -137,28 +171,24 @@ local function AutomatonInstanceIterator(automaton)
 	end
 end
 
-local AutomatonInstance = {}
-function AutomatonInstance:on(event, handler)
-	self._listeners[event] = handler
-end
 
-function AutomatonInstance:reset (context)
+function internal.Automaton:reset (context)
 	self._context = context
 	self._current = nil
 end
 
-function AutomatonInstance:pairs (context)
+function internal.Automaton:pairs (context)
 	self._context = context or self._context
-	return AutomatonInstanceIterator(self)
+	return self._iterator(self)
 end
 
-function AutomatonInstance:update (context)
+function internal.Automaton:update (context)
 	local ctx = context or self._context
 	
 	if self._current == nil
 	then
-		invoke (AutomatonClass.EVENT.START, self, {
-			initial = self._initial,
+		internal.invoke (public.Automaton.EVENT.START, self, {
+			current = self._initial,
 			context = ctx
 		})
 	end
@@ -186,12 +216,12 @@ function AutomatonInstance:update (context)
 			iteration = iteration
 		}
 			
-		invoke(AutomatonClass.EVENT.EXIT, self._current, event)
+		internal.invoke(public.Automaton.EVENT.EXIT, self._current, event)
 		self._current = t.state
-		invoke (AutomatonClass.EVENT.TRANSITION, self, event)
-		invoke (AutomatonClass.EVENT.ENTER, self._current, event)
+		internal.invoke (public.Automaton.EVENT.TRANSITION, self, event)
+		internal.invoke (public.Automaton.EVENT.ENTER, self._current, event)
 
-		if includes (visited, self._current)
+		if internal.includes (visited, self._current)
 		then
 			loop = false
 		else
@@ -201,8 +231,8 @@ function AutomatonInstance:update (context)
 		
 	if #self._current._transitions == 0
 	then
-		invoke(AutomatonClass.EVENT.TERMINATE, self, {
-			final = self._current,
+		internal.invoke(public.Automaton.EVENT.TERMINATE, self, {
+			current = self._current,
 			context = ctx
 		})
 		return false, "Terminated"
@@ -211,27 +241,26 @@ function AutomatonInstance:update (context)
 	return true
 end
 
-function AutomatonClass.new(initial)
+function public.Automaton.new(initial)
 	local this = {
 		_listeners = {},
 		_initial = initial,
 		_current = nil,
 		_listeners = {},
+		on = internal.on
 	}
-	for k, f in pairs (AutomatonInstance)
+	for k, f in pairs (internal.Automaton)
 	do
 		this[k] = f
 	end
 	
 	setmetatable (this, {
-		__pairs = AutomatonInstanceIterator,
-		__ipairs = AutomatonInstanceIterator,
+		__pairs = this._iterator,
+		__ipairs = this._iterator,
 		__call = function (this, context)
 			return this:update (context)
 		end,
-		__index = function (o, k)
-			return rawget (o, "_" .. k)
-		end
+		__index = internal.__index
 	})
 	
 	this:reset()
@@ -239,13 +268,11 @@ function AutomatonClass.new(initial)
 	return this
 end
 
-setmetatable (AutomatonClass, {
-	__call = function (AutomatonClass, initial) 
-		return AutomatonClass.new(initial)
+setmetatable (public.Automaton, {
+	__call = function(initial) 
+		return public.Automaton.new(initial)
 	end
 })
 
-return {
-	State = StateClass,
-	Automaton = AutomatonClass
-}
+---------------------------------
+return public
