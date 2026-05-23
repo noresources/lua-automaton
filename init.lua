@@ -21,33 +21,38 @@ local internal = {
 	Automaton = {}
 }
 
+-- Asserts that value has the given Lua type name.
 function internal.typecheck(value, expected, name)
 	local t = type(value)
-	assert ( t == expected, name 
+	assert ( t == expected, name
 		and expected .. " type expected for " .. name .. ". Got " .. t
-		or expected " expected. Got " .. t)
+		or expected .. " expected. Got " .. t)
 end
 
+-- Returns true for functions and callable tables (tables with a __call metamethod).
 function internal.iscallable(value)
 	local t = type(value)
 	if t == "function" then return true end
 	if t ~= "table" then return false end
-	
+
 	local mt = getmetatable (value)
 	if not mt then return false end
-		
+
 	return type(mt.__call) == "function"
 end
 
+-- Registers handler for event; shared by State and Automaton instances.
 function internal:on (event, handler)
 	internal.typecheck(event, "string", "event")
 	self._listeners[event] = handler
 end
 
+-- Exposes private _k fields as public k for read-only access.
 function internal.__index(o, k)
 	return rawget(o, "_" .. k)
 end
 
+-- Linear search; returns true if needle is present in the ipairs sequence of haystack.
 function internal.includes(haystack, needle)
 	for _, e in ipairs (haystack)
 	do
@@ -56,6 +61,7 @@ function internal.includes(haystack, needle)
 	return false
 end
 
+-- Fires emitter's registered listener for event type, merging data fields into the event table.
 function internal.invoke (type, emitter, data)
 	local handler = emitter.listeners [type]
 	if not handler then return end
@@ -71,9 +77,10 @@ end
 -------------------------------------
 -- State
 
+-- Appends a transition to state, normalising validator to a callable before storing it.
 function internal.State:connect(validator, state)
 	internal.typecheck(state, "table", "state")
-	
+
 	local t = type (validator)
 	if (t == "boolean") or (t == "nil")
 	then
@@ -103,12 +110,13 @@ function internal.State:connect(validator, state)
 			return true
 		end
 	end
-	
+
 	assert(internal.iscallable(validator), "Validator must be callable")
-	
+
 	table.insert(self._transitions, {validator = validator, state = state})
 end
 
+-- Returns the first transition whose validator passes for context, or nil.
 function internal.State:accept( context )
 	for _, t in ipairs (self._transitions)
 	do
@@ -130,29 +138,29 @@ function public.State.new(data)
 	do
 		this[k] = v
 	end
-	
+
 	this.on = internal.on
 	this._listeners = {}
-	
+
 	this._transitions = {}
-	
+
 	for k, f in pairs (internal.State)
 	do
 		this[k] = f
 	end
-	
+
 	setmetatable (this, {
 		__call = function (this, context)
 			return this:accept(context)
 		end,
 		__index = internal.__index
 	})
-	
+
 	return this
 end
 
 setmetatable (public.State, {
-	__call = function(data)
+	__call = function(_, data)
 		return public.State.new(data)
 	end
 })
@@ -160,6 +168,7 @@ setmetatable (public.State, {
 --------------------------------------------------
 -- Automaton
 
+-- Returns a stateful iterator that drives the automaton forward one update per call.
 function internal.Automaton._iterator(automaton)
 	automaton._current = nil
 	local i = 0
@@ -182,9 +191,11 @@ function internal.Automaton:pairs (context)
 	return self._iterator(self)
 end
 
+-- Advances the automaton: follows transitions from the current state until blocked, cycled, or terminal.
+-- Returns true while the automaton is still running; false when it has terminated or encountered an error.
 function internal.Automaton:update (context)
 	local ctx = context or self._context
-	
+
 	if self._current == nil
 	then
 		internal.invoke (public.Automaton.EVENT.START, self, {
@@ -192,10 +203,10 @@ function internal.Automaton:update (context)
 			context = ctx
 		})
 	end
-	
+
 	self._current = self._current or self._initial
 	if not self._current then return false, "No current state" end
-	
+
 	local visited = { self._current }
 	local loop = false
 	if #self._current.transitions > 0
@@ -207,7 +218,7 @@ function internal.Automaton:update (context)
 	do
 		local t = self._current:accept (ctx)
 		if not t then return true, "No more transition validates (" .. #self._current.transitions .. ")" end
-		
+
 		local event = {
 			incoming = self._current,
 			context = ctx,
@@ -215,11 +226,13 @@ function internal.Automaton:update (context)
 			transition = t,
 			iteration = iteration
 		}
-			
+
 		internal.invoke(public.Automaton.EVENT.EXIT, self._current, event)
 		self._current = t.state
 		internal.invoke (public.Automaton.EVENT.TRANSITION, self, event)
 		internal.invoke (public.Automaton.EVENT.ENTER, self._current, event)
+
+		iteration = iteration + 1
 
 		if internal.includes (visited, self._current)
 		then
@@ -228,7 +241,7 @@ function internal.Automaton:update (context)
 			table.insert (visited, self._current)
 		end
 	end
-		
+
 	if #self._current._transitions == 0
 	then
 		internal.invoke(public.Automaton.EVENT.TERMINATE, self, {
@@ -237,7 +250,7 @@ function internal.Automaton:update (context)
 		})
 		return false, "Terminated"
 	end
-	
+
 	return true
 end
 
@@ -246,14 +259,13 @@ function public.Automaton.new(initial)
 		_listeners = {},
 		_initial = initial,
 		_current = nil,
-		_listeners = {},
 		on = internal.on
 	}
 	for k, f in pairs (internal.Automaton)
 	do
 		this[k] = f
 	end
-	
+
 	setmetatable (this, {
 		__pairs = this._iterator,
 		__ipairs = this._iterator,
@@ -262,14 +274,14 @@ function public.Automaton.new(initial)
 		end,
 		__index = internal.__index
 	})
-	
+
 	this:reset()
-	
+
 	return this
 end
 
 setmetatable (public.Automaton, {
-	__call = function(initial) 
+	__call = function(_, initial)
 		return public.Automaton.new(initial)
 	end
 })
